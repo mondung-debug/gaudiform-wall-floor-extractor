@@ -1,0 +1,48 @@
+{
+  "_comment": "건설 USD에서 특정 층 벽/바닥 추출 → 단일 USD 머지 저장",
+  "tasks": [
+    {
+      "_comment": "벽/바닥 추출 (post_all: 폴더 내 USD 전체 순회 후 머지)",
+      "common": {
+        "scheduling_file_max_count": 1,
+        "input_path": "D:/project/output/construction",
+        "input_extension": ".usd",
+        "output_directory": "D:/project/output/walls_floors",
+        "recursive": true
+      },
+      "scheduler": {
+        "resume": { "enable": false },
+        "convert": { "enable": false },
+        "scene_optimizer": { "enable": false },
+        "post_processing": {
+          "enable": true,
+          "operations": [
+            {
+              "_comment": "TODO: wall_types / floor_types는 실제 데이터 확인 후 수정",
+              "enable": true,
+              "operation": "external",
+              "script": "C:/path/to/gaudiform-wall-floor-extractor/gaudiform/core/wall_floor_extractor/wall_floor_extractor_operation.py",
+              "params": {
+                "construction_usd_dir": "D:/project/output/construction",
+                "output_path": "D:/project/output/walls_floors/9FL_walls_floors.usd",
+                "target_floor_name": "9th FL",
+                "floor_z_auto": true,
+                "floor_z_min": 0.0,
+                "floor_z_max": 0.0,
+                "wall_types": ["IFCWALL", "IFCWALLSTANDARDCASE", "IFCCURTAINWALL"],
+                "floor_types": ["IFCSLAB", "IFCPLATE"],
+                "recursive": true
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "log": {
+    "enable": true,
+    "directory": "D:/project/logs"
+  },
+  "cadConverterConfig": {},
+  "sceneOptimizerConfig": {}
+}
