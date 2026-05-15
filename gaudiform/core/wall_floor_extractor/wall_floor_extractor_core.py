@@ -2,17 +2,18 @@
 """
 WallFloorExtractor core logic.
 
-특정 층(floor)에 속한 벽(Wall)과 바닥(Slab) prim을 여러 USD 파일에서 수집하여
+특정 층(floor)에 속한 벽(Wall)과 바닥(Floor) prim을 여러 USD 파일에서 수집하여
 하나의 USD 파일로 머지 저장합니다.
 
 동작:
   1. 지정 폴더의 .usd 파일을 순회
-  2. IFCBUILDINGSTOREY prim으로 대상 층 Z 범위 자동 계산 (fab_splitter와 동일)
+  2. IFCBUILDINGSTOREY prim으로 대상 층 Z 범위 자동 계산
   3. 해당 Z 범위에 걸치는 벽/바닥 prim 수집
   4. 수집된 모든 prim을 단일 USD로 머지 저장
 
-벽/바닥 판별 기준: TODO — 내일 확인 후 구현
-  현재 플레이스홀더: ATTR_TYPE 기준 IFC 타입 목록으로 필터링
+벽/바닥 판별 기준:
+  - omni:hoops:metadata:Other:Category 가 CATEGORIES에 속하거나
+  - omni:hoops:metadata:Other:tn__FamilyName_mA 가 FAMILY_NAMES에 속하면 대상
 """
 
 from __future__ import annotations
@@ -23,13 +24,15 @@ from typing import Callable
 from pxr import Sdf, Usd, UsdGeom, Gf
 
 
-# ── Metadata attribute names (Hoops Connector 규칙) ───────────────────────────
-ATTR_TYPE       = "omni:hoops:metadata:TYPE"
-ATTR_LEVEL_NAME = "omni:hoops:metadata:tn__IdentityData_qC:Name"
+# ── Metadata attribute names ──────────────────────────────────────────────────
+ATTR_TYPE        = "omni:hoops:metadata:TYPE"
+ATTR_LEVEL_NAME  = "omni:hoops:metadata:tn__IdentityData_qC:Name"
+ATTR_CATEGORY    = "omni:hoops:metadata:Other:Category"
+ATTR_FAMILY_NAME = "omni:hoops:metadata:Other:tn__FamilyName_mA"
 
-# ── 기본 벽/바닥 IFC 타입 (TODO: 실제 데이터 확인 후 수정) ────────────────────
-DEFAULT_WALL_TYPES  = ["IFCWALL", "IFCWALLSTANDARDCASE", "IFCCURTAINWALL"]
-DEFAULT_FLOOR_TYPES = ["IFCSLAB", "IFCPLATE"]
+# ── 기본 필터 기준 ────────────────────────────────────────────────────────────
+DEFAULT_CATEGORIES   = {"Curtain Panels", "Walls", "Floors"}
+DEFAULT_FAMILY_NAMES = {"System Panel", "Access Floor Panel", "Basic Wall", "Floor"}
 
 
 def _get_attr(prim: Usd.Prim, attr_name: str):
@@ -61,14 +64,13 @@ def _calc_z_range(
     floor_z_max: float,
     log: Callable,
 ) -> tuple[float, float] | None:
-    """층 Z 범위 계산. (z_min, z_max) 반환, 실패 시 None."""
     if floor_z_auto:
         target_z = levels.get(target_floor_name)
         if target_z is None:
             log(f"[WARN] '{target_floor_name}' 층을 찾을 수 없습니다.")
             return None
         sorted_z = sorted(levels.values())
-        idx  = sorted_z.index(target_z)
+        idx   = sorted_z.index(target_z)
         z_min = target_z
         z_max = sorted_z[idx + 1] if idx + 1 < len(sorted_z) else target_z + 10.0
         log(f"[AUTO] '{target_floor_name}' Z={target_z:.3f} → range: [{z_min:.3f}, {z_max:.3f}]")
@@ -90,15 +92,17 @@ def _is_bbox_in_range(prim: Usd.Prim, bbox_cache: UsdGeom.BBoxCache,
         return False
 
 
-def _is_wall_or_floor(prim: Usd.Prim, wall_types: set[str], floor_types: set[str]) -> bool:
-    """
-    TODO: 실제 데이터 확인 후 판별 로직 확정.
-    현재: ATTR_TYPE이 wall_types 또는 floor_types에 속하면 True.
-    """
-    prim_type = _get_attr(prim, ATTR_TYPE)
-    if prim_type is None:
-        return False
-    return prim_type in wall_types or prim_type in floor_types
+def _is_target(prim: Usd.Prim,
+               categories: set[str],
+               family_names: set[str]) -> bool:
+    """Category 또는 Family Name이 필터 목록에 속하면 True."""
+    cat = _get_attr(prim, ATTR_CATEGORY)
+    if cat and str(cat) in categories:
+        return True
+    fam = _get_attr(prim, ATTR_FAMILY_NAME)
+    if fam and str(fam) in family_names:
+        return True
+    return False
 
 
 def _copy_stage_metadata(src_layer: Sdf.Layer, dst_layer: Sdf.Layer) -> None:
@@ -144,15 +148,12 @@ def collect_from_usd(
     usd_path: str,
     z_min: float,
     z_max: float,
-    wall_types: set[str],
-    floor_types: set[str],
+    categories: set[str],
+    family_names: set[str],
     dst_layer: Sdf.Layer,
     log: Callable,
 ) -> int:
-    """
-    단일 USD 파일에서 대상 층 벽/바닥 prim을 수집해 dst_layer에 복사.
-    Returns: 복사된 prim 수
-    """
+    """단일 USD 파일에서 대상 층 벽/바닥 prim을 수집해 dst_layer에 복사."""
     try:
         stage = Usd.Stage.Open(usd_path)
     except Exception as e:
@@ -169,7 +170,7 @@ def collect_from_usd(
     for prim in stage.TraverseAll():
         if not prim.IsActive():
             continue
-        if not _is_wall_or_floor(prim, wall_types, floor_types):
+        if not _is_target(prim, categories, family_names):
             continue
         if not _is_bbox_in_range(prim, bbox_cache, z_min, z_max):
             continue
@@ -190,19 +191,18 @@ def process_folder(
     floor_z_auto: bool = True,
     floor_z_min: float = 0.0,
     floor_z_max: float = 0.0,
-    wall_types: list[str] | None = None,
-    floor_types: list[str] | None = None,
+    categories: list[str] | None = None,
+    family_names: list[str] | None = None,
     recursive: bool = True,
     log: Callable[[str], None] | None = None,
 ) -> int:
     """
     input_dir의 USD 파일들에서 대상 층 벽/바닥을 수집해 output_path에 머지 저장.
-
     Returns: 총 수집된 prim 수
     """
-    _log = log or print
-    wall_set  = set(wall_types  or DEFAULT_WALL_TYPES)
-    floor_set = set(floor_types or DEFAULT_FLOOR_TYPES)
+    _log      = log or print
+    cat_set   = set(categories   or DEFAULT_CATEGORIES)
+    fam_set   = set(family_names or DEFAULT_FAMILY_NAMES)
 
     # USD 파일 목록 수집
     usd_files: list[str] = []
@@ -219,7 +219,7 @@ def process_folder(
 
     _log(f"[WallFloorExtractor] USD 파일 {len(usd_files)}개 발견")
 
-    # Z 범위 결정: 첫 번째 USD에서 층 정보 탐색
+    # Z 범위 결정
     resolved_z_min, resolved_z_max = floor_z_min, floor_z_max
     if floor_z_auto and usd_files:
         for usd_path in usd_files:
@@ -228,7 +228,7 @@ def process_folder(
                 levels = find_floor_levels(stage)
                 if levels:
                     for name, z in sorted(levels.items(), key=lambda x: x[1]):
-                        marker = " ← TARGET" if name == target_floor_name else ""
+                        marker = " <- TARGET" if name == target_floor_name else ""
                         _log(f"  [FLOOR] {name}: Z={z:.3f}m{marker}")
                     result = _calc_z_range(
                         levels, target_floor_name, floor_z_auto,
@@ -239,7 +239,7 @@ def process_folder(
             except Exception:
                 continue
         else:
-            _log(f"[WARN] 층 정보를 찾을 수 없습니다. floor_z_min/max 기본값 사용.")
+            _log("[WARN] 층 정보를 찾을 수 없습니다. floor_z_min/max 기본값 사용.")
     else:
         _log(f"[CONFIG] Z range: [{resolved_z_min:.3f}, {resolved_z_max:.3f}]")
 
@@ -252,11 +252,11 @@ def process_folder(
         _log(f"  처리 중: {filename}")
         count = collect_from_usd(
             usd_path, resolved_z_min, resolved_z_max,
-            wall_set, floor_set, dst_layer, _log)
-        _log(f"    → {count}개 수집")
+            cat_set, fam_set, dst_layer, _log)
+        _log(f"    -> {count}개 수집")
         total += count
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     dst_layer.Export(output_path)
-    _log(f"[WallFloorExtractor] 완료: 총 {total}개 prim → {output_path}")
+    _log(f"[WallFloorExtractor] 완료: 총 {total}개 prim -> {output_path}")
     return total

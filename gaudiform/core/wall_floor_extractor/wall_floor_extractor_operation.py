@@ -10,8 +10,8 @@ params:
     floor_z_auto          (bool,  default true)
     floor_z_min           (float, default 0.0)  — floor_z_auto=false일 때 사용
     floor_z_max           (float, default 0.0)  — floor_z_auto=false일 때 사용
-    wall_types            (list,  default ["IFCWALL","IFCWALLSTANDARDCASE","IFCCURTAINWALL"])
-    floor_types           (list,  default ["IFCSLAB","IFCPLATE"])
+    categories            (list,  default ["Curtain Panels", "Walls", "Floors"])
+    family_names          (list,  default ["System Panel", "Access Floor Panel", "Basic Wall", "Floor"])
     recursive             (bool,  default true)
 """
 
@@ -45,8 +45,8 @@ class WallFloorExtractorOperation(PostProcessOperation):
         floor_z_auto      = bool(p.get("floor_z_auto", True))
         floor_z_min       = float(p.get("floor_z_min", 0.0))
         floor_z_max       = float(p.get("floor_z_max", 0.0))
-        wall_types        = p.get("wall_types", None)
-        floor_types       = p.get("floor_types", None)
+        categories        = p.get("categories", None)
+        family_names      = p.get("family_names", None)
         recursive         = bool(p.get("recursive", True))
 
         context.on_info(_TAG, f"벽/바닥 추출 시작 — 대상 층: {target_floor_name}")
@@ -66,8 +66,8 @@ class WallFloorExtractorOperation(PostProcessOperation):
             floor_z_auto=floor_z_auto,
             floor_z_min=floor_z_min,
             floor_z_max=floor_z_max,
-            wall_types=wall_types,
-            floor_types=floor_types,
+            categories=categories,
+            family_names=family_names,
             recursive=recursive,
             log=_log,
         )
