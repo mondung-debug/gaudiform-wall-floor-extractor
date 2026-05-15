@@ -7,14 +7,9 @@ WallFloorExtractor core logic.
 
 동작:
   1. 지정 폴더의 .usd 파일을 순회
-  2. IFCBUILDINGSTOREY prim으로 대상 층 Z 범위 자동 계산
-  3. kind=component + Category/Family Name 필터 통과 prim 수집
-  4. 수집된 모든 prim을 단일 USD (defaultPrim 아래)로 머지 저장
-
-벽/바닥 판별 기준:
-  - kind == "component"  (kind_filter="" 이면 무시)
-  - omni:hoops:metadata:Other:Category 가 CATEGORIES에 속하거나
-  - omni:hoops:metadata:Other:tn__FamilyName_mA 가 FAMILY_NAMES에 속하면 대상
+  2. kind=group + Category=Levels 로 층 Z 범위 자동 계산
+  3. kind=component + Category/Family Name 필터 + bbox Z 범위로 prim 수집
+  4. fab_splitter 방식으로 ancestor 포함 머지 저장
 """
 
 from __future__ import annotations
@@ -22,14 +17,13 @@ from __future__ import annotations
 import os
 from typing import Callable
 
-from pxr import Kind, Sdf, Usd, UsdGeom, Gf
+from pxr import Kind, Sdf, Usd, UsdGeom
 
 
 # ── Metadata attribute names ──────────────────────────────────────────────────
-ATTR_TYPE        = "omni:hoops:metadata:TYPE"
-ATTR_LEVEL_NAME  = "omni:hoops:metadata:tn__IdentityData_qC:Name"
 ATTR_CATEGORY    = "omni:hoops:metadata:Other:Category"
 ATTR_FAMILY_NAME = "omni:hoops:metadata:Other:tn__FamilyName_mA"
+ATTR_LEVEL_NAME  = "omni:hoops:metadata:tn__IdentityData_qC:Name"
 
 # ── 기본 필터 기준 ────────────────────────────────────────────────────────────
 DEFAULT_CATEGORIES   = {"Curtain Panels", "Walls", "Floors"}
@@ -43,6 +37,8 @@ def _get_attr(prim: Usd.Prim, attr_name: str):
     return None
 
 
+# ── 층 탐색 (kind=group + Category=Levels) ──────────────────────────────────
+
 def find_floor_levels(stage: Usd.Stage) -> dict[str, float]:
     """kind=group + Category=Levels prim world Z 수집 → {name: z}"""
     levels: dict[str, float] = {}
@@ -52,7 +48,7 @@ def find_floor_levels(stage: Usd.Stage) -> dict[str, float]:
         if _get_attr(prim, ATTR_CATEGORY) != "Levels":
             continue
         name = _get_attr(prim, ATTR_LEVEL_NAME)
-        if name and name not in levels:
+        if name and str(name) not in levels:
             xf  = UsdGeom.Xformable(prim)
             mat = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
             levels[str(name)] = mat.ExtractTranslation()[2]
@@ -83,6 +79,8 @@ def _calc_z_range(
         return floor_z_min, floor_z_max
 
 
+# ── 수집 ─────────────────────────────────────────────────────────────────────
+
 def _is_bbox_in_range(prim: Usd.Prim, bbox_cache: UsdGeom.BBoxCache,
                       z_min: float, z_max: float) -> bool:
     try:
@@ -95,84 +93,39 @@ def _is_bbox_in_range(prim: Usd.Prim, bbox_cache: UsdGeom.BBoxCache,
         return False
 
 
-def _is_target(prim: Usd.Prim,
-               categories: set[str],
-               family_names: set[str]) -> bool:
-    """Category 또는 Family Name이 필터 목록에 속하면 True."""
-    cat = _get_attr(prim, ATTR_CATEGORY)
-    if cat and str(cat) in categories:
-        return True
-    fam = _get_attr(prim, ATTR_FAMILY_NAME)
-    if fam and str(fam) in family_names:
-        return True
-    return False
+def collect_prims(
+    stage: Usd.Stage,
+    bbox_cache: UsdGeom.BBoxCache,
+    z_min: float,
+    z_max: float,
+    categories: set[str],
+    family_names: set[str],
+    kind_filter: str,
+    log: Callable,
+) -> list[Sdf.Path]:
+    """조건에 맞는 prim path 목록 반환."""
+    result: list[Sdf.Path] = []
+    for prim in stage.TraverseAll():
+        if not prim.IsActive():
+            continue
+        if kind_filter and Usd.ModelAPI(prim).GetKind() != kind_filter:
+            continue
+        cat = _get_attr(prim, ATTR_CATEGORY)
+        fam = _get_attr(prim, ATTR_FAMILY_NAME)
+        if not (cat and str(cat) in categories) and \
+           not (fam and str(fam) in family_names):
+            continue
+        if not _is_bbox_in_range(prim, bbox_cache, z_min, z_max):
+            continue
+        result.append(prim.GetPath())
+    return result
 
 
-def _dst_path(src_path: Sdf.Path, prim_root: str) -> Sdf.Path:
-    """src_path를 prim_root 아래로 리맵. prim_root가 빈 문자열이면 원본 유지."""
-    if not prim_root:
-        return src_path
-    rel = src_path.MakeRelativePath(Sdf.Path.absoluteRootPath)
-    return Sdf.Path(f"/{prim_root}").AppendPath(rel)
+# ── 내보내기 (fab_splitter 방식) ─────────────────────────────────────────────
 
-
-def _ensure_ancestors(src_stage: Usd.Stage, dst_layer: Sdf.Layer,
-                      src_path: Sdf.Path, prim_root: str) -> None:
-    src_layer   = src_stage.GetRootLayer()
-    parent_path = src_path.GetParentPath()
-    if parent_path in (Sdf.Path.absoluteRootPath, Sdf.Path.emptyPath):
-        return
-    _ensure_ancestors(src_stage, dst_layer, parent_path, prim_root)
-
-    dst_parent = _dst_path(parent_path, prim_root)
-    if dst_layer.GetPrimAtPath(dst_parent):
-        return
-
-    src_spec = src_layer.GetPrimAtPath(parent_path)
-    spec_type = src_spec.typeName if src_spec else ""
-    specifier = src_spec.specifier if src_spec else Sdf.SpecifierDef
-
-    dst_par_parent = dst_parent.GetParentPath()
-    if dst_par_parent == Sdf.Path.absoluteRootPath:
-        dst_spec = Sdf.PrimSpec(dst_layer, dst_parent.name, specifier)
-    else:
-        par_spec = dst_layer.GetPrimAtPath(dst_par_parent)
-        if not par_spec:
-            return
-        dst_spec = Sdf.PrimSpec(par_spec, dst_parent.name, specifier)
-    dst_spec.typeName = spec_type
-
-    # 속성 전체 복사 (transform + metadata 보존, 자식 prim 제외)
-    if src_spec:
-        for prop_name in list(src_spec.properties.keys()):
-            try:
-                Sdf.CopySpec(src_layer, src_spec.path.AppendProperty(prop_name),
-                             dst_layer, dst_spec.path.AppendProperty(prop_name))
-            except Exception:
-                pass
-        # prim 레벨 metadata 복사
-        for key in src_spec.ListInfoKeys():
-            if key in ("typeName", "specifier", "children"):
-                continue
-            try:
-                dst_spec.SetInfo(key, src_spec.GetInfo(key))
-            except Exception:
-                pass
-
-
-def _ensure_root_prim(dst_layer: Sdf.Layer, prim_root: str, up_axis: str = "Z") -> None:
-    """dst_layer에 defaultPrim Xform 생성 및 upAxis 강제 설정."""
-    if not prim_root:
-        return
-    root_path = Sdf.Path(f"/{prim_root}")
-    if not dst_layer.GetPrimAtPath(root_path):
-        Sdf.PrimSpec(dst_layer, prim_root, Sdf.SpecifierDef, "Xform")
-    dst_layer.defaultPrim = prim_root
-    if up_axis:
-        dst_layer.pseudoRoot.SetInfo("upAxis", up_axis)
-
-
-def _copy_stage_metadata(src_layer: Sdf.Layer, dst_layer: Sdf.Layer) -> None:
+def _copy_stage_metadata(src_layer: Sdf.Layer, dst_layer: Sdf.Layer,
+                          up_axis: str = "Z") -> None:
+    dst_layer.defaultPrim   = src_layer.defaultPrim
     dst_layer.documentation = src_layer.documentation
     if src_layer.customLayerData:
         dst_layer.customLayerData = dict(src_layer.customLayerData)
@@ -185,53 +138,73 @@ def _copy_stage_metadata(src_layer: Sdf.Layer, dst_layer: Sdf.Layer) -> None:
                 dst_pr.SetInfo(key, src_pr.GetInfo(key))
             except Exception:
                 pass
-
-
-def collect_from_usd(
-    usd_path: str,
-    z_min: float,
-    z_max: float,
-    categories: set[str],
-    family_names: set[str],
-    dst_layer: Sdf.Layer,
-    log: Callable,
-    kind_filter: str = "component",
-    prim_root: str = "World",
-) -> int:
-    """단일 USD 파일에서 대상 층 벽/바닥 prim을 수집해 dst_layer에 복사."""
-    try:
-        stage = Usd.Stage.Open(usd_path)
-    except Exception as e:
-        log(f"[WARN] 열기 실패 {usd_path}: {e}")
-        return 0
-
-    src_layer  = stage.GetRootLayer()
-    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
-
-    if not dst_layer.pseudoRoot.ListInfoKeys():
-        _copy_stage_metadata(src_layer, dst_layer)
-
-    count = 0
-    for prim in stage.TraverseAll():
-        if not prim.IsActive():
-            continue
-        if kind_filter and Usd.ModelAPI(prim).GetKind() != kind_filter:
-            continue
-        if not _is_target(prim, categories, family_names):
-            continue
-        if not _is_bbox_in_range(prim, bbox_cache, z_min, z_max):
-            continue
-        src_path = prim.GetPath()
-        dst      = _dst_path(src_path, prim_root)
-        _ensure_ancestors(stage, dst_layer, src_path, prim_root)
+    # upAxis 강제 설정
+    if up_axis:
         try:
-            Sdf.CopySpec(src_layer, src_path, dst_layer, dst)
-            count += 1
+            dst_pr.SetInfo("upAxis", up_axis)
+        except Exception:
+            pass
+
+
+def _ensure_ancestors(src_stage: Usd.Stage, dst_layer: Sdf.Layer,
+                      prim_path: Sdf.Path) -> None:
+    """fab_splitter 방식: ancestor prim을 속성/메타 포함해서 생성."""
+    src_layer   = src_stage.GetRootLayer()
+    parent_path = prim_path.GetParentPath()
+    if parent_path in (Sdf.Path.absoluteRootPath, Sdf.Path.emptyPath):
+        return
+    _ensure_ancestors(src_stage, dst_layer, parent_path)
+    if dst_layer.GetPrimAtPath(parent_path):
+        return
+    src_spec = src_layer.GetPrimAtPath(parent_path)
+    if not src_spec:
+        return
+    par_parent = parent_path.GetParentPath()
+    if par_parent == Sdf.Path.absoluteRootPath:
+        dst_spec = Sdf.PrimSpec(dst_layer, parent_path.name, src_spec.specifier)
+    else:
+        par_spec = dst_layer.GetPrimAtPath(par_parent)
+        if not par_spec:
+            return
+        dst_spec = Sdf.PrimSpec(par_spec, parent_path.name, src_spec.specifier)
+    dst_spec.typeName = src_spec.typeName
+    for key in src_spec.ListInfoKeys():
+        if key in ("specifier", "typeName"):
+            continue
+        try:
+            dst_spec.SetInfo(key, src_spec.GetInfo(key))
+        except Exception:
+            pass
+    for prop_spec in src_spec.properties.values():
+        try:
+            Sdf.CopySpec(src_layer, prop_spec.path, dst_layer, prop_spec.path)
+        except Exception:
+            pass
+
+
+def export_merged(
+    src_stage: Usd.Stage,
+    prim_paths: list[Sdf.Path],
+    output_path: str,
+    up_axis: str = "Z",
+    log: Callable = print,
+) -> None:
+    src_layer = src_stage.GetRootLayer()
+    dst_layer = Sdf.Layer.CreateAnonymous()
+    _copy_stage_metadata(src_layer, dst_layer, up_axis)
+
+    for path in prim_paths:
+        _ensure_ancestors(src_stage, dst_layer, path)
+        try:
+            Sdf.CopySpec(src_layer, path, dst_layer, path)
         except Exception as e:
-            log(f"[WARN] CopySpec 실패 {src_path}: {e}")
+            log(f"[WARN] CopySpec 실패 {path}: {e}")
 
-    return count
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    dst_layer.Export(output_path)
 
+
+# ── 메인 ─────────────────────────────────────────────────────────────────────
 
 def process_folder(
     input_dir: str,
@@ -243,7 +216,6 @@ def process_folder(
     categories: list[str] | None = None,
     family_names: list[str] | None = None,
     kind_filter: str = "component",
-    default_prim: str = "World",
     up_axis: str = "Z",
     recursive: bool = True,
     log: Callable[[str], None] | None = None,
@@ -271,7 +243,7 @@ def process_folder(
 
     _log(f"[WallFloorExtractor] USD 파일 {len(usd_files)}개 발견")
 
-    # Z 범위 결정
+    # Z 범위 결정 (첫 번째 유효 USD에서 층 정보 탐색)
     resolved_z_min, resolved_z_max = floor_z_min, floor_z_max
     if floor_z_auto and usd_files:
         for usd_path in usd_files:
@@ -295,19 +267,44 @@ def process_folder(
     else:
         _log(f"[CONFIG] Z range: [{resolved_z_min:.3f}, {resolved_z_max:.3f}]")
 
-    # 머지 레이어 생성
-    dst_layer = Sdf.Layer.CreateAnonymous()
-    _ensure_root_prim(dst_layer, default_prim, up_axis)
+    # 각 USD에서 prim 수집 후 머지
+    all_paths_per_stage: list[tuple[Usd.Stage, list[Sdf.Path]]] = []
     total = 0
 
     for usd_path in usd_files:
         filename = os.path.basename(usd_path)
-        _log(f"  처리 중: {filename}")
-        count = collect_from_usd(
-            usd_path, resolved_z_min, resolved_z_max,
-            cat_set, fam_set, dst_layer, _log, kind_filter, default_prim)
-        _log(f"    -> {count}개 수집")
-        total += count
+        try:
+            stage = Usd.Stage.Open(usd_path)
+        except Exception as e:
+            _log(f"  [WARN] 열기 실패 {filename}: {e}")
+            continue
+
+        bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+        paths = collect_prims(stage, bbox_cache, resolved_z_min, resolved_z_max,
+                               cat_set, fam_set, kind_filter, _log)
+        _log(f"  {filename}: {len(paths)}개 수집")
+        if paths:
+            all_paths_per_stage.append((stage, paths))
+            total += len(paths)
+
+    if total == 0:
+        _log("[WallFloorExtractor] 수집된 prim 없음.")
+        return 0
+
+    # 첫 번째 stage 기준으로 머지 레이어 생성 후 나머지 append
+    first_stage, first_paths = all_paths_per_stage[0]
+    src_layer = first_stage.GetRootLayer()
+    dst_layer = Sdf.Layer.CreateAnonymous()
+    _copy_stage_metadata(src_layer, dst_layer, up_axis)
+
+    for stage, paths in all_paths_per_stage:
+        s_layer = stage.GetRootLayer()
+        for path in paths:
+            _ensure_ancestors(stage, dst_layer, path)
+            try:
+                Sdf.CopySpec(s_layer, path, dst_layer, path)
+            except Exception as e:
+                _log(f"  [WARN] CopySpec 실패 {path}: {e}")
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     dst_layer.Export(output_path)

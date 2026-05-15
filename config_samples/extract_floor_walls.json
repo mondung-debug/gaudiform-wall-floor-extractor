@@ -31,7 +31,6 @@
                 "categories": ["Curtain Panels", "Walls", "Floors"],
                 "family_names": ["System Panel", "Access Floor Panel", "Basic Wall", "Floor"],
                 "kind_filter": "component",
-                "default_prim": "World",
                 "up_axis": "Z",
                 "recursive": true
               }

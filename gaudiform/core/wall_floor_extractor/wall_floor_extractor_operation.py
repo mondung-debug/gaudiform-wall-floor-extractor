@@ -13,7 +13,7 @@ params:
     categories            (list,  default ["Curtain Panels", "Walls", "Floors"])
     family_names          (list,  default ["System Panel", "Access Floor Panel", "Basic Wall", "Floor"])
     kind_filter           (str,   default "component")  — 빈 문자열이면 kind 무시
-    default_prim          (str,   default "World")  — 머지 USD의 defaultPrim 이름
+    up_axis               (str,   default "Z")
     recursive             (bool,  default true)
 """
 
@@ -50,7 +50,6 @@ class WallFloorExtractorOperation(PostProcessOperation):
         categories        = p.get("categories", None)
         family_names      = p.get("family_names", None)
         kind_filter       = p.get("kind_filter", "component")
-        default_prim      = p.get("default_prim", "World")
         up_axis           = p.get("up_axis", "Z")
         recursive         = bool(p.get("recursive", True))
 
@@ -74,7 +73,6 @@ class WallFloorExtractorOperation(PostProcessOperation):
             categories=categories,
             family_names=family_names,
             kind_filter=kind_filter,
-            default_prim=default_prim,
             up_axis=up_axis,
             recursive=recursive,
             log=_log,
