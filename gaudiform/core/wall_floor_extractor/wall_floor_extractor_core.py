@@ -44,16 +44,18 @@ def _get_attr(prim: Usd.Prim, attr_name: str):
 
 
 def find_floor_levels(stage: Usd.Stage) -> dict[str, float]:
-    """IFCBUILDINGSTOREY prim world Z 수집 → {name: z}"""
+    """kind=group + Category=Levels prim world Z 수집 → {name: z}"""
     levels: dict[str, float] = {}
     for prim in stage.TraverseAll():
-        if _get_attr(prim, ATTR_TYPE) != "IFCBUILDINGSTOREY":
+        if Usd.ModelAPI(prim).GetKind() != "group":
+            continue
+        if _get_attr(prim, ATTR_CATEGORY) != "Levels":
             continue
         name = _get_attr(prim, ATTR_LEVEL_NAME)
         if name and name not in levels:
             xf  = UsdGeom.Xformable(prim)
             mat = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            levels[name] = mat.ExtractTranslation()[2]
+            levels[str(name)] = mat.ExtractTranslation()[2]
     return levels
 
 
