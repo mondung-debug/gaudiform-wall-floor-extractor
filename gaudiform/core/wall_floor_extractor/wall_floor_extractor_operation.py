@@ -51,6 +51,7 @@ class WallFloorExtractorOperation(PostProcessOperation):
         family_names      = p.get("family_names", None)
         kind_filter       = p.get("kind_filter", "component")
         default_prim      = p.get("default_prim", "World")
+        up_axis           = p.get("up_axis", "Z")
         recursive         = bool(p.get("recursive", True))
 
         context.on_info(_TAG, f"벽/바닥 추출 시작 — 대상 층: {target_floor_name}")
@@ -74,6 +75,7 @@ class WallFloorExtractorOperation(PostProcessOperation):
             family_names=family_names,
             kind_filter=kind_filter,
             default_prim=default_prim,
+            up_axis=up_axis,
             recursive=recursive,
             log=_log,
         )

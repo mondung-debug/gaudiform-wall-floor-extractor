@@ -143,14 +143,16 @@ def _ensure_ancestors(src_stage: Usd.Stage, dst_layer: Sdf.Layer,
     dst_spec.typeName = spec_type
 
 
-def _ensure_root_prim(dst_layer: Sdf.Layer, prim_root: str) -> None:
-    """dst_layer에 defaultPrim Xform 생성."""
+def _ensure_root_prim(dst_layer: Sdf.Layer, prim_root: str, up_axis: str = "Z") -> None:
+    """dst_layer에 defaultPrim Xform 생성 및 upAxis 강제 설정."""
     if not prim_root:
         return
     root_path = Sdf.Path(f"/{prim_root}")
     if not dst_layer.GetPrimAtPath(root_path):
         Sdf.PrimSpec(dst_layer, prim_root, Sdf.SpecifierDef, "Xform")
     dst_layer.defaultPrim = prim_root
+    if up_axis:
+        dst_layer.pseudoRoot.SetInfo("upAxis", up_axis)
 
 
 def _copy_stage_metadata(src_layer: Sdf.Layer, dst_layer: Sdf.Layer) -> None:
@@ -225,6 +227,7 @@ def process_folder(
     family_names: list[str] | None = None,
     kind_filter: str = "component",
     default_prim: str = "World",
+    up_axis: str = "Z",
     recursive: bool = True,
     log: Callable[[str], None] | None = None,
 ) -> int:
@@ -277,7 +280,7 @@ def process_folder(
 
     # 머지 레이어 생성
     dst_layer = Sdf.Layer.CreateAnonymous()
-    _ensure_root_prim(dst_layer, default_prim)
+    _ensure_root_prim(dst_layer, default_prim, up_axis)
     total = 0
 
     for usd_path in usd_files:
