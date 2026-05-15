@@ -12,6 +12,8 @@ params:
     floor_z_max           (float, default 0.0)  — floor_z_auto=false일 때 사용
     categories            (list,  default ["Curtain Panels", "Walls", "Floors"])
     family_names          (list,  default ["System Panel", "Access Floor Panel", "Basic Wall", "Floor"])
+    kind_filter           (str,   default "component")  — 빈 문자열이면 kind 무시
+    default_prim          (str,   default "World")  — 머지 USD의 defaultPrim 이름
     recursive             (bool,  default true)
 """
 
@@ -47,6 +49,8 @@ class WallFloorExtractorOperation(PostProcessOperation):
         floor_z_max       = float(p.get("floor_z_max", 0.0))
         categories        = p.get("categories", None)
         family_names      = p.get("family_names", None)
+        kind_filter       = p.get("kind_filter", "component")
+        default_prim      = p.get("default_prim", "World")
         recursive         = bool(p.get("recursive", True))
 
         context.on_info(_TAG, f"벽/바닥 추출 시작 — 대상 층: {target_floor_name}")
@@ -68,6 +72,8 @@ class WallFloorExtractorOperation(PostProcessOperation):
             floor_z_max=floor_z_max,
             categories=categories,
             family_names=family_names,
+            kind_filter=kind_filter,
+            default_prim=default_prim,
             recursive=recursive,
             log=_log,
         )

@@ -8,10 +8,11 @@ WallFloorExtractor core logic.
 동작:
   1. 지정 폴더의 .usd 파일을 순회
   2. IFCBUILDINGSTOREY prim으로 대상 층 Z 범위 자동 계산
-  3. 해당 Z 범위에 걸치는 벽/바닥 prim 수집
-  4. 수집된 모든 prim을 단일 USD로 머지 저장
+  3. kind=component + Category/Family Name 필터 통과 prim 수집
+  4. 수집된 모든 prim을 단일 USD (defaultPrim 아래)로 머지 저장
 
 벽/바닥 판별 기준:
+  - kind == "component"  (kind_filter="" 이면 무시)
   - omni:hoops:metadata:Other:Category 가 CATEGORIES에 속하거나
   - omni:hoops:metadata:Other:tn__FamilyName_mA 가 FAMILY_NAMES에 속하면 대상
 """
@@ -21,7 +22,7 @@ from __future__ import annotations
 import os
 from typing import Callable
 
-from pxr import Sdf, Usd, UsdGeom, Gf
+from pxr import Kind, Sdf, Usd, UsdGeom, Gf
 
 
 # ── Metadata attribute names ──────────────────────────────────────────────────
@@ -105,8 +106,52 @@ def _is_target(prim: Usd.Prim,
     return False
 
 
+def _dst_path(src_path: Sdf.Path, prim_root: str) -> Sdf.Path:
+    """src_path를 prim_root 아래로 리맵. prim_root가 빈 문자열이면 원본 유지."""
+    if not prim_root:
+        return src_path
+    rel = src_path.MakeRelativePath(Sdf.Path.absoluteRootPath)
+    return Sdf.Path(f"/{prim_root}").AppendPath(rel)
+
+
+def _ensure_ancestors(src_stage: Usd.Stage, dst_layer: Sdf.Layer,
+                      src_path: Sdf.Path, prim_root: str) -> None:
+    src_layer   = src_stage.GetRootLayer()
+    parent_path = src_path.GetParentPath()
+    if parent_path in (Sdf.Path.absoluteRootPath, Sdf.Path.emptyPath):
+        return
+    _ensure_ancestors(src_stage, dst_layer, parent_path, prim_root)
+
+    dst_parent = _dst_path(parent_path, prim_root)
+    if dst_layer.GetPrimAtPath(dst_parent):
+        return
+
+    src_spec = src_layer.GetPrimAtPath(parent_path)
+    spec_type = src_spec.typeName if src_spec else ""
+    specifier = src_spec.specifier if src_spec else Sdf.SpecifierDef
+
+    dst_par_parent = dst_parent.GetParentPath()
+    if dst_par_parent == Sdf.Path.absoluteRootPath:
+        dst_spec = Sdf.PrimSpec(dst_layer, dst_parent.name, specifier)
+    else:
+        par_spec = dst_layer.GetPrimAtPath(dst_par_parent)
+        if not par_spec:
+            return
+        dst_spec = Sdf.PrimSpec(par_spec, dst_parent.name, specifier)
+    dst_spec.typeName = spec_type
+
+
+def _ensure_root_prim(dst_layer: Sdf.Layer, prim_root: str) -> None:
+    """dst_layer에 defaultPrim Xform 생성."""
+    if not prim_root:
+        return
+    root_path = Sdf.Path(f"/{prim_root}")
+    if not dst_layer.GetPrimAtPath(root_path):
+        Sdf.PrimSpec(dst_layer, prim_root, Sdf.SpecifierDef, "Xform")
+    dst_layer.defaultPrim = prim_root
+
+
 def _copy_stage_metadata(src_layer: Sdf.Layer, dst_layer: Sdf.Layer) -> None:
-    dst_layer.defaultPrim   = src_layer.defaultPrim
     dst_layer.documentation = src_layer.documentation
     if src_layer.customLayerData:
         dst_layer.customLayerData = dict(src_layer.customLayerData)
@@ -121,29 +166,6 @@ def _copy_stage_metadata(src_layer: Sdf.Layer, dst_layer: Sdf.Layer) -> None:
                 pass
 
 
-def _ensure_ancestors(src_stage: Usd.Stage, dst_layer: Sdf.Layer,
-                      prim_path: Sdf.Path) -> None:
-    src_layer   = src_stage.GetRootLayer()
-    parent_path = prim_path.GetParentPath()
-    if parent_path in (Sdf.Path.absoluteRootPath, Sdf.Path.emptyPath):
-        return
-    _ensure_ancestors(src_stage, dst_layer, parent_path)
-    if dst_layer.GetPrimAtPath(parent_path):
-        return
-    src_spec = src_layer.GetPrimAtPath(parent_path)
-    if not src_spec:
-        return
-    par_parent = parent_path.GetParentPath()
-    if par_parent == Sdf.Path.absoluteRootPath:
-        dst_spec = Sdf.PrimSpec(dst_layer, parent_path.name, src_spec.specifier)
-    else:
-        par_spec = dst_layer.GetPrimAtPath(par_parent)
-        if not par_spec:
-            return
-        dst_spec = Sdf.PrimSpec(par_spec, parent_path.name, src_spec.specifier)
-    dst_spec.typeName = src_spec.typeName
-
-
 def collect_from_usd(
     usd_path: str,
     z_min: float,
@@ -152,6 +174,8 @@ def collect_from_usd(
     family_names: set[str],
     dst_layer: Sdf.Layer,
     log: Callable,
+    kind_filter: str = "component",
+    prim_root: str = "World",
 ) -> int:
     """단일 USD 파일에서 대상 층 벽/바닥 prim을 수집해 dst_layer에 복사."""
     try:
@@ -170,16 +194,20 @@ def collect_from_usd(
     for prim in stage.TraverseAll():
         if not prim.IsActive():
             continue
+        if kind_filter and Usd.ModelAPI(prim).GetKind() != kind_filter:
+            continue
         if not _is_target(prim, categories, family_names):
             continue
         if not _is_bbox_in_range(prim, bbox_cache, z_min, z_max):
             continue
-        _ensure_ancestors(stage, dst_layer, prim.GetPath())
+        src_path = prim.GetPath()
+        dst      = _dst_path(src_path, prim_root)
+        _ensure_ancestors(stage, dst_layer, src_path, prim_root)
         try:
-            Sdf.CopySpec(src_layer, prim.GetPath(), dst_layer, prim.GetPath())
+            Sdf.CopySpec(src_layer, src_path, dst_layer, dst)
             count += 1
         except Exception as e:
-            log(f"[WARN] CopySpec 실패 {prim.GetPath()}: {e}")
+            log(f"[WARN] CopySpec 실패 {src_path}: {e}")
 
     return count
 
@@ -193,6 +221,8 @@ def process_folder(
     floor_z_max: float = 0.0,
     categories: list[str] | None = None,
     family_names: list[str] | None = None,
+    kind_filter: str = "component",
+    default_prim: str = "World",
     recursive: bool = True,
     log: Callable[[str], None] | None = None,
 ) -> int:
@@ -200,9 +230,9 @@ def process_folder(
     input_dir의 USD 파일들에서 대상 층 벽/바닥을 수집해 output_path에 머지 저장.
     Returns: 총 수집된 prim 수
     """
-    _log      = log or print
-    cat_set   = set(categories   or DEFAULT_CATEGORIES)
-    fam_set   = set(family_names or DEFAULT_FAMILY_NAMES)
+    _log    = log or print
+    cat_set = set(categories   or DEFAULT_CATEGORIES)
+    fam_set = set(family_names or DEFAULT_FAMILY_NAMES)
 
     # USD 파일 목록 수집
     usd_files: list[str] = []
@@ -245,6 +275,7 @@ def process_folder(
 
     # 머지 레이어 생성
     dst_layer = Sdf.Layer.CreateAnonymous()
+    _ensure_root_prim(dst_layer, default_prim)
     total = 0
 
     for usd_path in usd_files:
@@ -252,7 +283,7 @@ def process_folder(
         _log(f"  처리 중: {filename}")
         count = collect_from_usd(
             usd_path, resolved_z_min, resolved_z_max,
-            cat_set, fam_set, dst_layer, _log)
+            cat_set, fam_set, dst_layer, _log, kind_filter, default_prim)
         _log(f"    -> {count}개 수집")
         total += count
 
