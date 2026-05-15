@@ -142,6 +142,23 @@ def _ensure_ancestors(src_stage: Usd.Stage, dst_layer: Sdf.Layer,
         dst_spec = Sdf.PrimSpec(par_spec, dst_parent.name, specifier)
     dst_spec.typeName = spec_type
 
+    # 속성 전체 복사 (transform + metadata 보존, 자식 prim 제외)
+    if src_spec:
+        for prop_name in list(src_spec.properties.keys()):
+            try:
+                Sdf.CopySpec(src_layer, src_spec.path.AppendProperty(prop_name),
+                             dst_layer, dst_spec.path.AppendProperty(prop_name))
+            except Exception:
+                pass
+        # prim 레벨 metadata 복사
+        for key in src_spec.ListInfoKeys():
+            if key in ("typeName", "specifier", "children"):
+                continue
+            try:
+                dst_spec.SetInfo(key, src_spec.GetInfo(key))
+            except Exception:
+                pass
+
 
 def _ensure_root_prim(dst_layer: Sdf.Layer, prim_root: str, up_axis: str = "Z") -> None:
     """dst_layer에 defaultPrim Xform 생성 및 upAxis 강제 설정."""
